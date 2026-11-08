@@ -165,8 +165,8 @@ INFO: sequence=0 policyload=0
    `/vendor_dlkm/lib/modules` 那 436 个 ko **全部是 DSP 内核（6.1.57-gbfe3896ae95e / maybe-dirty）编的**，
    与主内核 6.1.157 无关，`match_main_kernel = 0`。不是权限问题，是数据不存在 ⇒ A 路线不成立，
    **B 路线（开着 MODVERSIONS 编、编完清空 `__versions`、装载时 SHN_ABS）是唯一路线**。
-2. **四家原厂管理器还没在真机上跑完一次提权**：ko 都编好、`vermagic` 与版本号自检已过，
-   差的只是真机装载那一下（FinaSU 线已全绿）。
+2. **四家原厂管理器的提权已在真机走通**（2026-11-08）：SukiSU Ultra / KernelSU-Next / BakaSU / KernelSU 的
+   ko 装上去、管理器显示已安装。SP7 档的 ko 只过了 `vermagic` 与版本号自检 —— 手上没有跑那个内核的设备。
 3. `su98260` 只在 SELinux Permissive 窗口可用；模块加载后 Enforcing 恢复，装完再做特性探测必失败 ——
    这是设计使然，不是 bug。
 
