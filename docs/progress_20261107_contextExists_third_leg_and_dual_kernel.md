@@ -105,3 +105,30 @@ P2（libsepol 离线差集表）/ P3（真快照）。
       （当前探测器没抱怨 seqno，等下一版一起验证）
 - [ ] P2：用 libsepol 离线性算出厂策略的 allowed 位图，替掉手写清位
 - [ ] SP7 那台若是别的管理器（SukiSU/Next 等），需按对应 `mgr_pkg` 再编 ko
+
+## 5. SP7 能否复用 g84 的提权参数（2026-11-13 复核）
+
+结论：可以，而且 App 已经在用同一套。
+
+证据：
+
+- g84 的 boot 解包：`kernel.bin` 40,942,080 B，未压缩 ARM64 Image
+  （`cve-2026-98260/docs/progress_20261022.md:68`）。
+- SP7 的 boot.img：header v4、`kernel_size=40,942,080`、无 ramdisk、cmdline 空；
+  IKCONFIG 与 `config/device-os11.config` 逐字节相同；AVB hash 自洽。⇒ 两个内核的
+  Image 布局、源码、补丁偏移、KMI 一致，唯一变量是 vermagic。
+- `kgo.sh` 两个内核的 patcher 兜底都是 `commit_creds=0x15fe88`；`exploit` 内嵌的
+  g84 `build_target` 只是日志/自检，SP7 上 `1021f/h` 已跑通。
+
+参数层：
+
+- `Deployer` 不按内核分支，B2/传统两条路的 `PC98260_*` 环境一致；默认
+  `pressureKb=-1`（auto，keep 4,800,000 KB）、`lockers=7`、`churnRounds=4`、`attempts=4`。
+- `progress_20261104_speed.md`：`[mem] auto` keep=4800000；v3.0 把 attempts 从 3 提到 4。
+- `progress_20261104_wall.md`：命中的 12 次全在 round 0/1，5 次 miss 跑满 16 轮也没 hit；
+  CHURN_ROUNDS=16 无收益，默认 4，miss 代价从 ~21 s 降到 ~6 s。
+
+注意：布局一致只保证偏移与滑窗可用，不保证每次命中；命中率仍由 churn/UAF 时序与可用内存
+决定。SP7 目前留痕的是 2026-11-07 的 P0 验收（旧 `1021f/h` 路径，DirtySepolicy OK），
+当前 B2 默认参数尚未在 SP7 上打日志，第一次跑重点看 `[mem] auto`、`[churn] hit round` 与 wall。
+若 SP7 的 MemAvailable 与 g84 差很多，把压力显式设成 4,800,000 KB（高级设置已有 4.8G 选项）。
