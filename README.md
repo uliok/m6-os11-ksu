@@ -9,7 +9,7 @@
 
 流程照抄自 [`m6-bvlgari-ksu`](../m6-bvlgari-ksu)（MagicOS 10 / `…g7d3922fade43`，已验证），
 这边做三件事：**加档位**（`config/targets.json` 的 `os11` / `os11sp7`）、**独立产物命名**（两份 ko 不会互相覆盖）、
-**SELinux 隐藏层只挂在我们自己那条线**（见下文）。
+**SELinux 隐藏层打进 SukiSU / FinaSU / KernelSU-Next 三家的线**（见下文）。
 
 ## 两个内核档其实同源
 
@@ -45,13 +45,13 @@ vermagic 就对齐了。**但** `__versions` 里的结构体 CRC 是按树算的
 ```bash
 # 单发：FinaSU（这条线带我们的 SELinux 隐藏补丁）
 gh workflow run build-ko-os11.yml --ref rel-150 -f target=os11 \
-  -f ksu_repo=LyraVoid/FinaSU -f ksu_ref=v1.5.0 \
-  -f ksu_tarball=https://codeload.github.com/LyraVoid/FinaSU/tar.gz/refs/tags/v1.5.0 \
-  -f ko_alias=finasu150 -f ksu_version=33174 -f mgr_pkg=me.yuki.fina \
-  -f hook_mode=manual -F no_modversions=true -F ksu_debug=true
+  -f ksu_repo=LyraVoid/FinaSU -f ksu_ref=v1.6.1 \
+  -f ksu_tarball=https://codeload.github.com/LyraVoid/FinaSU/tar.gz/refs/tags/v1.6.1 \
+  -f ko_alias=finasu161seh -f ksu_version=33198 -f mgr_pkg=me.yuki.fina \
+  -f hook_mode=manual -F selinux_patch=true -F no_modversions=true -F ksu_debug=true
 
 # 一次把「四家原厂管理器 × 两个内核」排上（每个 job 25~40 分钟，注意额度）
-# 原厂线一律 selinux_patch=false：不改上游一个字节，保证稳定性
+# BakaSU / KernelSU 原厂线 selinux_patch=false；SukiSU / FinaSU / Next 需要隐藏时 =true
 for t in os11 os11sp7; do
   for m in "SukiSU-Ultra/SukiSU-Ultra v4.3.0-r1 sukisu430 41140 com.sukisu.ultra manual" \
            "KernelSU-Next/KernelSU-Next v3.4.2 ksunext342 33355 com.rifsxd.ksunext manual" \
@@ -102,9 +102,9 @@ python scripts/audit_apk_kos.py "D:/githubs/ksu-app/dist/M6Shell-9.30-multimgr.a
 
 | 管理器 | 包名 | vc | uapi | 源码点 | config 键 | SELinux 补丁 |
 |---|---|---|---|---|---|---|
-| FinaSU 1.5.0 | `me.yuki.fina` | 33174 | 6 | `v1.5.0` | `rel-150` 线 | **有**（我们那套） |
-| SukiSU Ultra | `com.sukisu.ultra` | 41140（r1）/ 41150（r2） | 6 | `v4.3.0-r1` | `sukisu430` | 无（原厂） |
-| KernelSU-Next | `com.rifsxd.ksunext` | 33355 | 5 | `v3.4.2` | `next342` | 无 |
+| FinaSU 1.6.1 | `me.yuki.fina` | 33198 | 6 | `v1.6.1` | `rel-150` 线 | **有** |
+| SukiSU Ultra 4.3.0-r2 | `com.sukisu.ultra` | 41150 | 6 | `v4.3.0-r2` | `sukisu430` | **有**（`selinux_patch=true` 时） |
+| KernelSU-Next 3.4.2 | `com.rifsxd.ksunext` | 33355 | 5 | `v3.4.2` | `next342` | **有**（`selinux_patch=true` 时） |
 | BakaSU | `com.resukisu.resukisu` | 35252 | 6 | **commit `d5e9e025`** | `basu420` | 无 |
 | KernelSU | `me.weishu.kernelsu` | 32680 | 5 | `v3.3.1` | `ksu331` | 无 |
 
@@ -137,7 +137,7 @@ AAPT2="D:/Android/Sdk/build-tools/35.0.0/aapt2.exe" \
   python scripts/check_manager_apk.py "C:/Users/<user>/Desktop/apks" --strict
 ```
 
-## SELinux 隐藏层只挂 FinaSU 这条线
+## SELinux 隐藏层（SukiSU / FinaSU / KernelSU-Next）
 
 实现在 `patch/selinux_hide_wrappers.inc`（由 `patch/apply_selinux_hide_direct_store.py` 插入 `kernel/feature/selinux_hide.c`）：
 
@@ -149,15 +149,16 @@ AAPT2="D:/Android/Sdk/build-tools/35.0.0/aapt2.exe" \
 | `avdSeqNo` | app 的**所有** access 响应统一写成 `1`（一位数也要改，否则永远停在原值） |
 | attr 第三条腿 | kretprobe `selinux_setprocattr`：把 `EPERM` 改写 `EINVAL` |
 
-验证基线（DirtySepolicy 2.2，FinaSU 1.5.0 + 上面这套）：
+验证基线（DirtySepolicy 2.2，SukiSU 4.3.0-r2 / FinaSU 1.6.1 / KernelSU-Next 3.4.2 + 上面这套）：
 
 ```
 OK: no dirty sepolicy found
 INFO: sequence=0 policyload=0
 ```
 
-其它管理器**不带这套**：SukiSU/KernelSU 上游自带的 `selinux_hide` 仍在（那是它自己的特性），
-我们只是不改它。原因很实在 —— 我们的补丁靠 `selinux_hide.c` 里的锚点，跟着五家一起追版本只会让稳定性崩。
+BakaSU 与 KernelSU **不带这套**：上游自身的 `selinux_hide` 保留不动。BakaSU 的锚点差异
+（`write_op` 强转、无 status-unhook、`ksu_ro_write` 前置声明）已在 direct_store 脚本中兼容，
+但本套件未给 BakaSU 编这套补丁。
 
 ## 已知缺口
 
@@ -165,8 +166,9 @@ INFO: sequence=0 policyload=0
    `/vendor_dlkm/lib/modules` 那 436 个 ko **全部是 DSP 内核（6.1.57-gbfe3896ae95e / maybe-dirty）编的**，
    与主内核 6.1.157 无关，`match_main_kernel = 0`。不是权限问题，是数据不存在 ⇒ A 路线不成立，
    **B 路线（开着 MODVERSIONS 编、编完清空 `__versions`、装载时 SHN_ABS）是唯一路线**。
-2. **四家原厂管理器的提权已在真机走通**（2026-11-08）：SukiSU Ultra / KernelSU-Next / BakaSU / KernelSU 的
-   ko 装上去、管理器显示已安装。SP7 档的 ko 只过了 `vermagic` 与版本号自检 —— 手上没有跑那个内核的设备。
+2. **五家管理器的提权已在真机走通**：SukiSU Ultra / FinaSU / KernelSU-Next 三家带 SELinux 隐藏，
+   DirtySepolicy 报 `OK: no dirty sepolicy found`；BakaSU / KernelSU 使用原厂模块。
+   SP7 档的 ko 只过了 `vermagic` 与版本号自检 —— 手上没有跑那个内核的设备。
 3. `su98260` 只在 SELinux Permissive 窗口可用；模块加载后 Enforcing 恢复，装完再做特性探测必失败 ——
    这是设计使然，不是 bug。
 
@@ -177,7 +179,7 @@ INFO: sequence=0 policyload=0
 config/targets.json                         档位表（唯一真源：localversion / sublevel / config / source_var）
 config/managers.json                        管理器 ↔ 上游仓库/ref/uapi/apk 版本号
 config/device-os11.config                   从 boot.img 的 IKCONFIG 解出来的真机 config（两档共用）
-patch/selinux_hide_wrappers.inc             SELinux 隐藏层实现（只进 FinaSU 线）
+patch/selinux_hide_wrappers.inc             SELinux 隐藏层实现（SukiSU / FinaSU / Next 三家）
 patch/apply_selinux_hide_direct_store.py    把它插进 selinux_hide.c（锚点失败即退出）
 patch/apply_sc_inject.py                    uapi6 的 sc_table 注入补丁
 patch/apply_mgr_pkgs.py                     多管理器包名补丁
