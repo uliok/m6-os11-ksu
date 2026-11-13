@@ -172,11 +172,11 @@ Shizuku 由 Stellar 提供（api 13）。
 
 ## 8. 后续
 
-- **覆盖范围**：原版 `tiann/KernelSU` 没有集成 SUSFS，不给它编这套；只覆盖四家 fork：
+- **覆盖范围**：原版 `tiann/KernelSU` 没有集成 SUSFS，不给它编这套；只覆盖三家 fork：
   - SukiSU 4.3.0-r2：✅ 已验收（run `43368289046`）
-  - FinaSU v1.6.1：run `43408767740`（构建中）
-  - KernelSU-Next v3.4.2：run `43408780920`（构建中）
-  - BakaSU v4.2.0-rc3：run `43409733978`（构建中；补丁已兼容它的 `write_op` 强转与无 status-unhook）
+  - FinaSU v1.6.1：✅ 已验收（722,488 B，md5 `2f3647943bc3e3165a9a990251b5235f`）
+  - KernelSU-Next v3.4.2：已编入（610,320 B，md5 `2a86984b1e4a421b838b687b4435d832`，待真机）
+  - BakaSU v4.2.0-rc3：按用户决定不做（3 家够用），保留原 ko
 - **隐藏式 su 入口默认关闭**：`/system_ext/bin/su` 的 tmpfs 覆盖会多一个可见文件/挂载点，降低隐藏性；
   `PREF_SU_ENTRY` 默认 `false`（`prefs.getBoolean(..., false)`），文案已标注「会降低隐藏性」。
   关掉它不影响本机的 SELinux 隐藏（ko 在 init/forced 配置阶段就把 selinuxfs 的 fops 换好了）。
