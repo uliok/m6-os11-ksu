@@ -72,6 +72,11 @@ if "resolve-setmem" in fails:
     pr_info("selinux_hide: set_memory_rw=%d flush_tlb=%d", ksu_set_memory_rw != 0, ksu_flush_tlb_range != 0);
     ksu_fixmap_selftest();''', "resolve-setmem-cast")
 
+# BakaSU 的 hook_selinux_status_open() 在 wrapper 块之前就调 ksu_ro_write：补前置声明
+rep("static void hook_selinux_status_open()",
+    "static int ksu_ro_write(void *dst, const void *src, size_t n);\n\nstatic void hook_selinux_status_open()",
+    "declare-ksu_ro_write")
+
 rep("""    write_op_fn my = my_write_context;
     orig_context_write = *context_write;
     ret = ksu_patch_text(context_write, &my, sizeof(my), KSU_PATCH_TEXT_FLUSH_DCACHE);""",
