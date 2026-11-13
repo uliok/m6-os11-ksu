@@ -73,9 +73,11 @@ if "resolve-setmem" in fails:
     ksu_fixmap_selftest();''', "resolve-setmem-cast")
 
 # BakaSU 的 hook_selinux_status_open() 在 wrapper 块之前就调 ksu_ro_write：补前置声明
-rep("static void hook_selinux_status_open()",
-    "static int ksu_ro_write(void *dst, const void *src, size_t n);\n\nstatic void hook_selinux_status_open()",
-    "declare-ksu_ro_write")
+# 其它分支没有这个函数（status 不做 unhook），锚点不存在就跳过，不算失败
+if "static void hook_selinux_status_open()" in src:
+    rep("static void hook_selinux_status_open()",
+        "static int ksu_ro_write(void *dst, const void *src, size_t n);\n\nstatic void hook_selinux_status_open()",
+        "declare-ksu_ro_write")
 
 rep("""    write_op_fn my = my_write_context;
     orig_context_write = *context_write;
