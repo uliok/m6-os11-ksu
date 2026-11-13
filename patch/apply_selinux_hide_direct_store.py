@@ -58,6 +58,20 @@ rep('    selinux_write_op = find_kernel_symbol_exact("write_op");',
     pr_info("selinux_hide: set_memory_rw=%d flush_tlb=%d", ksu_set_memory_rw != 0, ksu_flush_tlb_range != 0);
     ksu_fixmap_selftest();''', "resolve-setmem")
 
+# BakaSU 等旧分支把 write_op 的查找写成带强转的形式：同一套插入换个锚点再试一次
+if "resolve-setmem" in fails:
+    fails.remove("resolve-setmem")
+    rep('    selinux_write_op = (write_op_fn *)find_kernel_symbol_exact("write_op");',
+        '''    selinux_write_op = (write_op_fn *)find_kernel_symbol_exact("write_op");
+    if (!ksu_set_memory_rw)
+        ksu_set_memory_rw = (ksu_setmem_fn)find_kernel_symbol_exact("set_memory_rw");
+    if (!ksu_flush_tlb_range)
+        ksu_flush_tlb_range = (ksu_flush_range_fn)find_kernel_symbol_exact("flush_tlb_kernel_range");
+    if (!ksu_flush_tlb_range)
+        ksu_flush_tlb_range = (ksu_flush_range_fn)find_kernel_symbol_exact("__flush_tlb_kernel_range");
+    pr_info("selinux_hide: set_memory_rw=%d flush_tlb=%d", ksu_set_memory_rw != 0, ksu_flush_tlb_range != 0);
+    ksu_fixmap_selftest();''', "resolve-setmem-cast")
+
 rep("""    write_op_fn my = my_write_context;
     orig_context_write = *context_write;
     ret = ksu_patch_text(context_write, &my, sizeof(my), KSU_PATCH_TEXT_FLUSH_DCACHE);""",
@@ -86,10 +100,14 @@ rep("""        ret =
 rep("""        ret = ksu_patch_text(access_write, &orig_access_write, sizeof(orig_access_write), KSU_PATCH_TEXT_FLUSH_DCACHE);""",
     """        ret = ksu_ro_write(access_write, &orig_access_write, sizeof(orig_access_write)); /* DIRECTSTORE */""", "unhook-access")
 
-rep("""        ret = ksu_patch_text(sel_open_handle_status_slot, &orig_sel_open_handle_status,
-                             sizeof(orig_sel_open_handle_status), KSU_PATCH_TEXT_FLUSH_DCACHE);""",
-    """        ret = ksu_ro_write(sel_open_handle_status_slot, &orig_sel_open_handle_status,
-                           sizeof(orig_sel_open_handle_status)); /* DIRECTSTORE */""", "unhook-status")
+# BakaSU 的 unhook 只还原 context/access，没有 status 分支：缺失时跳过，不算失败
+old_unhook_status = '''        ret = ksu_patch_text(sel_open_handle_status_slot, &orig_sel_open_handle_status,
+                             sizeof(orig_sel_open_handle_status), KSU_PATCH_TEXT_FLUSH_DCACHE);'''
+if src.count(old_unhook_status) == 1:
+    rep(old_unhook_status, '''        ret = ksu_ro_write(sel_open_handle_status_slot, &orig_sel_open_handle_status,
+                           sizeof(orig_sel_open_handle_status)); /* DIRECTSTORE */''', "unhook-status")
+else:
+    print("skip unhook-status (fork variant: no status unhook)")
 
 rep("""    int ret = ksu_patch_text(sel_open_handle_status_slot, &new_fn, sizeof(new_fn), KSU_PATCH_TEXT_FLUSH_DCACHE);""",
     """    int ret = ksu_ro_write(sel_open_handle_status_slot, &new_fn, sizeof(new_fn)); /* DIRECTSTORE */
