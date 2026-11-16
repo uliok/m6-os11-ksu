@@ -12,27 +12,6 @@
 
 static void ksu_mark(const char *what, long v); /* 下面到处用，先声明 */
 static int ksu_setprocattr_hook(void); /* 定义在文件后部（依赖 ksu_ctx_allowed） */
-static void ksu_resolve_probe_bits(void); /* 定义在文件后部（依赖 selinuxfs 读取） */
-/* 把 access 响应的原文打到 dmesg（限条数）。用来确认 allowed 的真实值和 seqno 位置。 */
-static void ksu_log_raw(const char *tag, struct file *file, ssize_t rv)
-{
-    static atomic_t left = ATOMIC_INIT(40);
-    char *ar = (char *)file->private_data;
-    char tmp[72];
-    size_t n;
-
-    if (!ar || rv <= 9)
-        return;
-    if (atomic_dec_if_positive(&left) < 0)
-        return;
-    n = (size_t)(rv - (ssize_t)sizeof(ssize_t));
-    if (n > sizeof(tmp) - 1)
-        n = sizeof(tmp) - 1;
-    memcpy(tmp, ar + sizeof(ssize_t), n);
-    tmp[n] = 0;
-    pr_info("selinux_hide: RAW %s = '%s'" "\n", tag, tmp);
-}
-static void ksu_fix_seqno_file(struct file *file, ssize_t rv); /* 定义在 ksu_fix_seqno 之后 */
 
 /* ===== DIRECTSTORE: 4/3 参数自适应包装 =====
  * 本内核里 write_op[] 的调用方可能给内核缓冲区（老式 selinuxfs），
@@ -328,20 +307,6 @@ static void ksu_mark(const char *what, long v)
  * 真机没有 dmesg（klogctl 对 shell/root 都拒绝），这是唯一能看见 hook 内部的路。 */
 static int ksu_hook_logs;
 
-/* 运行时诊断：/sys/module/kernelsu/parameters/hide_diag（0444，shell 可直接读）。
- * 本机 dmesg 对 shell 全 deny、su 又常常不可用，日志取不到时这是唯一可靠的通道。 */
-static char ksu_diag_buf[256] = "boot";
-module_param_string(hide_diag, ksu_diag_buf, sizeof(ksu_diag_buf), 0444);
-MODULE_PARM_DESC(hide_diag, "last selinux_hide event");
-
-static void ksu_diag(const char *fmt, ...)
-{
-    va_list ap;
-
-    va_start(ap, fmt);
-    vscnprintf(ksu_diag_buf, sizeof(ksu_diag_buf), fmt, ap);
-    va_end(ap);
-}
 static void ksu_hook_log(const char *kind, const char *buf, size_t size, int ok)
 {
     if (ksu_hook_logs >= 24)
@@ -555,6 +520,12 @@ static int ksu_hide_killed(void)
 static void ksu_fops_apply(struct work_struct *w);
 static DECLARE_DELAYED_WORK(ksu_fops_work, ksu_fops_apply);
 static int ksu_fops_queued;
+/* 软重启/zygote 重启后 selinuxfs 的 inode 会换掉，fops 钩子跟着丢；
+ * 周期检查一次，发现不是我们的副本就重挂。只在 selinux_hide 开启时跑。 */
+static int ksu_hide_enabled;
+static int ksu_rehook_started;
+static void ksu_rehook_fn(struct work_struct *w);
+static DECLARE_DELAYED_WORK(ksu_rehook_work, ksu_rehook_fn);
 
 /* ===== 策略文件读取拦截（.read / .mmap）=====
  * 有些检测器不走 security_check_context()，而是直接把 /sys/fs/selinux/policy
@@ -630,6 +601,7 @@ static void ksu_fops_do(void)
     ksu_mark("do-start", (long)system_state);
     if (ksu_hide_killed()) {
         ksu_mark("do-killed", 0);
+        ksu_hide_enabled = 0;
         pr_info("selinux_hide: hide_off present, skip all hooks\n");
         return;
     }
@@ -648,14 +620,17 @@ static void ksu_fops_do(void)
         ksu_fops_state = (r1 == 0 || r2 == 0 || r3 == 0) ? 1 : 0;
     }
     /* 策略一旦被注入，status 的 sequence/policyload 就是「被换过」的铁证：给 app 换成出厂值的假页 */
-    ksu_resolve_probe_bits(); /* 读 selinuxfs 拿到每个探针的权限位下标 */
     rs = ksu_status_fake();
     ksu_mark("do-status", rs);
     ksu_mark("do-setprocattr", ksu_setprocattr_hook());
     ksu_mark("do-done", ksu_fops_state);
-    ksu_diag("init ctx=%d acc=%d stock=%d st=%d", r1, r2, rp, rs);
     pr_info("selinux_hide: fops do ctx=%d acc=%d stock=%d status=%d state=%d\n", r1, r2, rp, rs,
             ksu_fops_state);
+    ksu_hide_enabled = ksu_fops_state;
+    if (ksu_fops_state && !ksu_rehook_started) {
+        ksu_rehook_started = 1;
+        schedule_delayed_work(&ksu_rehook_work, 5 * HZ);
+    }
 }
 
 static void ksu_fops_apply(struct work_struct *w)
@@ -666,6 +641,33 @@ static void ksu_fops_apply(struct work_struct *w)
         msleep(50);
     ksu_mark("work-start", (long)system_state);
     ksu_fops_do();
+}
+
+/* selinuxfs 的 inode 在软重启/zygote 重启后可能换新；检查当前挂的是不是我们的副本 */
+static int ksu_fops_ours(void)
+{
+    struct file *f = NULL;
+    struct inode *in = ksu_path_inode("/sys/fs/selinux/context", &f);
+    int ours;
+
+    if (!in)
+        return 0;
+    ours = (in->i_fop == &ksu_ctx_ops);
+    filp_close(f, NULL);
+    return ours;
+}
+
+static void ksu_rehook_fn(struct work_struct *w)
+{
+    if (!ksu_hide_enabled) {
+        ksu_rehook_started = 0;
+        return;
+    }
+    if (!ksu_fops_ours()) {
+        pr_info("selinux_hide: rehook after selinuxfs recreated (soft reboot)\n");
+        ksu_fops_do();
+    }
+    schedule_delayed_work(&ksu_rehook_work, 5 * HZ);
 }
 
 /* 调度：按"要写进去的那个指针"判断是哪个文件 */
@@ -693,11 +695,15 @@ static int ksu_ro_write(void *dst, const void *src, size_t n)
     if (want == (const void *)orig_context_write) {
         ksu_fops_restore("/sys/fs/selinux/context", ksu_ctx_orig);
         ksu_ctx_orig = NULL;
+        ksu_hide_enabled = 0;
+        ksu_rehook_started = 0;
         return 0;
     }
     if (want == (const void *)orig_access_write) {
         ksu_fops_restore("/sys/fs/selinux/access", ksu_acc_orig);
         ksu_acc_orig = NULL;
+        ksu_hide_enabled = 0;
+        ksu_rehook_started = 0;
         return 0;
     }
     pr_info("selinux_hide: ro_write unknown want=0x%lx slot=0x%lx\n", (unsigned long)want, (unsigned long)dst);
@@ -886,26 +892,20 @@ ssize_t my_write_context_auto(struct file *file, const char __user *ubuf, size_t
 struct ksu_pair_sig {
     const char *scon;
     const char *tcon;
-    const char *cls;  /* 探针所在的类：/sys/fs/selinux/class/<cls>/perms/<perm> 里能读到 bit 下标 */
-    const char *perm; /* **只清这一个权限位**，其余位保留 stock 值 */
-    int bit;          /* 运行时解析；解析失败就用这里烘死的默认值 */
 };
 
-/* 整字清零在 self 对上会显得「被人抹过」：干净机 system_server->system_server 对
- * process 类本来就允许一大堆权限。所以只清掉探测器真正在问的那一位。
- * bit 默认值是本机实测（cat /sys/fs/selinux/class/<cls>/perms/<perm>）得到。 */
-static struct ksu_pair_sig ksu_pair_sigs[] = {
-    {"system_server", "system_server", "process", "execmem", 26},      /* 自检/execmem */
-    {"shell", "su", "process", "transition", 2},                       /* transition */
-    {"", "rootfs", "filesystem", "associate", 7},                      /* Magisk */
-    {"", "tmpfs", "fifo_file", "open", 19},                            /* Magisk */
-    {"", "adb_data_file", "file", "read", 2},                          /* KernelSU */
-    {"", "adb_data_file", "dir", "search", 29},                        /* ZygiskNext */
-    {"", "apk_data_file", "file", "execute", 15},                      /* LSPosed */
-    {"", "dex2oat_exec", "file", "execute_no_trans", 26},              /* Xposed */
-};
-
-static int ksu_has_sub(const char *buf, size_t size, const char *needle)
+static const struct ksu_pair_sig ksu_pair_sigs[] = {
+    /* 说明：探测器的 scon 经常是「它自己的上下文」（v7 = app_zygote 或 untrusted_app），
+     * 按 scon 匹配会全部漏掉。所以除两条固定的以外，一律只按 tcon 匹配。
+     * 这些 tcon 在正常 app 的查询里几乎不出现（只有检测器会问），副作用可接受。 */
+    {"system_server", "system_server"},   /* process/execmem */
+    {"shell", "su"},                      /* process/transition */
+    {"", "rootfs"},                       /* filesystem/associate —— Magisk */
+    {"", "tmpfs"},                        /* fifo_file/open    —— Magisk */
+    {"", "adb_data_file"},                /* file/read, dir/search —— KernelSU / ZygiskNext */
+    {"", "apk_data_file"},                /* file/execute      —— LSPosed */
+    {"", "dex2oat_exec"},                 /* execute_no_trans  —— Xposed */
+};static int ksu_has_sub(const char *buf, size_t size, const char *needle)
 {
     size_t n = strlen(needle), i;
 
@@ -921,42 +921,10 @@ static int ksu_has_sub(const char *buf, size_t size, const char *needle)
  * file->private_data 是 simple_transaction_get() 分配的
  *   struct simple_transaction_argresp { ssize_t size; char data[]; };
  * 64 位上 data 从 +8 开始，内容是 "%x %x %x %x %x %x\n"，第一个词就是 allowed。 */
-/* 读 /sys/fs/selinux/class/<cls>/perms/<perm>，内容就是该权限的 bit 下标 */
-static int ksu_perm_bit_read(const char *cls, const char *perm)
-{
-    char path[128];
-    struct file *f;
-    char buf[16];
-    ssize_t n;
-    int v;
-
-    scnprintf(path, sizeof(path), "/sys/fs/selinux/class/%s/perms/%s", cls, perm);
-    f = filp_open(path, O_RDONLY, 0);
-    if (IS_ERR(f))
-        return -1;
-    n = ksu_read_file_all(f, buf, sizeof(buf) - 1);
-    filp_close(f, NULL);
-    if (n <= 0)
-        return -1;
-    buf[n] = 0;
-    if (kstrtoint(buf, 10, &v))
-        return -1;
-    return (v >= 0 && v < 32) ? v : -1;
-}
-
-static void ksu_resolve_probe_bits(void)
-{
-    size_t i;
-
-    for (i = 0; i < ARRAY_SIZE(ksu_pair_sigs); i++) {
-        int b = ksu_perm_bit_read(ksu_pair_sigs[i].cls, ksu_pair_sigs[i].perm);
-
-        if (b >= 0)
-            ksu_pair_sigs[i].bit = b;
-    }
-}
-
-/* 第 5 个字段是 avdSeqNo（响应格式 "%x %x %x %x %u %x"）。6.10 之前干净机固定给 1。 */
+/* 第 5 个字段是 avdSeqNo（响应格式 "%x %x %x %x %u %x"）。
+ * 6.10 之前的内核上干净机固定给 1；只清 allowed 而留着 live 的 seqno，
+ * 检测器仍可能据此判「策略被 reload 过」。这里把它改写成 1 并把多出来的字符左移掉，
+ * 保持「单个空格分隔」的形状不变（不要用空格填充，Java split 会得到空 token）。 */
 static void ksu_fix_seqno(char *d, ssize_t n)
 {
     ssize_t i = 0, start[8], end[8];
@@ -974,68 +942,16 @@ static void ksu_fix_seqno(char *d, ssize_t n)
     if (t < 5)
         return;
     {
-        ssize_t s0 = start[4], e0 = end[4], delta = (e0 - s0) - 1;
+        ssize_t s0 = start[4], e0 = end[4];
+        ssize_t delta = (e0 - s0) - 1;
 
-        /* 注意：seqno 是一位数（如 5）时长度不变，delta=0 —— 这种情况必须直接覆盖，
-         * 不能当成「不需要改」。只有原本就是 1 才跳过。 */
-        if (e0 - s0 == 1 && d[s0] == '1')
-            return;
+        if (delta <= 0)
+            return; /* 本来就是一个字符（多半已经是 1） */
         d[s0] = '1';
-        if (delta > 0) {
-            memmove(d + s0 + 1, d + e0, (size_t)(n - e0));
-            for (i = n - delta; i < n; i++)
-                d[i] = 0;
-        }
+        memmove(d + s0 + 1, d + e0, (size_t)(n - e0));
+        for (i = n - delta; i < n; i++)
+            d[i] = 0;
     }
-}
-
-/* 只清被探测的那一位（保留其它位），再把 seqno 改成 1 */
-/* 只把响应里的 avdSeqNo 改成干净值（不动 allowed 位图）。
- * DirtySepolicy 的 seqno 检查走的是自检查询（不在规则对表里），所以必须在放行路径上也改。 */
-static void ksu_fix_seqno_file(struct file *file, ssize_t rv)
-{
-    char *ar = (char *)file->private_data;
-
-    if (!ar || rv <= 9)
-        return;
-    ksu_fix_seqno(ar + sizeof(ssize_t), rv - (ssize_t)sizeof(ssize_t));
-}
-static void ksu_mask_probe_bit(struct file *file, ssize_t rv, int bit)
-{
-    char *ar = (char *)file->private_data;
-    char *d;
-    ssize_t n, i;
-    unsigned long v = 0;
-    char tmp[20];
-    int w, k;
-
-    if (!ar || rv <= 9)
-        return;
-    d = ar + sizeof(ssize_t);
-    n = rv - (ssize_t)sizeof(ssize_t);
-    if (bit >= 0 && bit < 32) {
-        for (i = 0; i < n && d[i] != ' ' && d[i] != '\n'; i++) {
-            int c = d[i], h;
-
-            if (c >= '0' && c <= '9')
-                h = c - '0';
-            else if (c >= 'a' && c <= 'f')
-                h = c - 'a' + 10;
-            else if (c >= 'A' && c <= 'F')
-                h = c - 'A' + 10;
-            else
-                break;
-            v = (v << 4) | (unsigned long)h;
-        }
-        if (i > 0) {
-            w = (int)i;
-            v &= ~(1UL << bit);
-            k = snprintf(tmp, sizeof(tmp), "%0*lx", w, v);
-            if (k > 0)
-                memcpy(d, tmp, (size_t)(k > w ? w : k));
-        }
-    }
-    ksu_fix_seqno(d, n);
 }
 static void ksu_zero_allowed(struct file *file, ssize_t rv)
 {
@@ -1048,11 +964,9 @@ static void ksu_zero_allowed(struct file *file, ssize_t rv)
     d = ar + sizeof(ssize_t);
     for (i = 0; i < rv - (ssize_t)sizeof(ssize_t) && d[i] != ' ' && d[i] != '\n'; i++)
         d[i] = '0';
-
-    ksu_fix_seqno_file(file, rv); /* 第 5 字段 avdSeqNo 也归位 */
+    ksu_fix_seqno(d, rv - (ssize_t)sizeof(ssize_t));
 }
-/* 命中返回下标（-1 未命中）：调用方据此知道该清哪一位 */
-static int ksu_pair_index(const char *buf, size_t size)
+static int ksu_pair_denied(const char *buf, size_t size)
 {
     size_t i;
 
@@ -1064,9 +978,9 @@ static int ksu_pair_index(const char *buf, size_t size)
             continue;
         if (tcon[0] && !ksu_has_sub(buf, size, tcon))
             continue;
-        return (int)i;
+        return 1;
     }
-    return -1;
+    return 0;
 }
 /* 对账日志：把「问了什么 -> 最终返回什么」成对打出来。
  * access 的应答体是 simple_transaction_argresp：ssize_t size + char data[]，
@@ -1182,7 +1096,7 @@ ssize_t my_write_access_auto(struct file *file, const char __user *ubuf, size_t 
 
     {
         char *kbuf;
-        int ok, pi;
+        int ok;
 
         if (size == 0 || size > 4096)
             return -EINVAL;
@@ -1208,33 +1122,20 @@ ssize_t my_write_access_auto(struct file *file, const char __user *ubuf, size_t 
                 pr_info("selinux_hide: ACC uid=%d ok=%d '%s'\n",
                         current_uid().val, ok, kbuf);
         }
-        pi = ok ? ksu_pair_index(kbuf, size) : -1;
-        ksu_diag("acc uid=%d ok=%d pi=%d bit=%d size=%zu", current_uid().val, ok, pi,
-                 pi >= 0 ? ksu_pair_sigs[pi].bit : -1, size);
-        if (pi >= 0) {
+        if (ok && ksu_pair_denied(kbuf, size)) { /* 规则层：照常算，但把 allowed 位图清零 */
             ssize_t rv2;
-            int pbit = ksu_pair_sigs[pi].bit;
 
-            pr_info("selinux_hide: pair deny uid=%d bit=%d\n", current_uid().val, pbit);
+            pr_info("selinux_hide: pair deny uid=%d\n", current_uid().val);
             rv2 = orig->write(file, ubuf, size, ppos);
             if (rv2 > 0) {
-                if (pi == 0) {
-                    /* self 对（system_server -> system_server）整字清零会被看出「被抹过」：
-                     * 干净机上它本来就允许一堆权限。只掩掉被探测的那一位。 */
-                    ksu_log_raw("before", file, rv2);
-                    ksu_mask_probe_bit(file, rv2, pbit);
-                    ksu_log_raw("after", file, rv2);
-                } else {
-                    ksu_zero_allowed(file, rv2);
-                }
-                ksu_fix_seqno_file(file, rv2);
+                ksu_zero_allowed(file, rv2);
                 if (atomic_dec_if_positive(&ksu_res_log_left) >= 0)
                     ksu_log_res(kbuf, file, rv2);
                 kfree(kbuf);
                 return rv2;
             }
             kfree(kbuf);
-            return -EINVAL;
+            return -EINVAL; /* 兜底：EINVAL 对方当「不存在」，同样静默 */
         }
         if (!ok) {
             pr_info("selinux_hide: access deny uid=%d '%s'\n", current_uid().val, kbuf);
@@ -1244,8 +1145,6 @@ ssize_t my_write_access_auto(struct file *file, const char __user *ubuf, size_t 
         {
             ssize_t rv3 = orig->write(file, ubuf, size, ppos);
 
-            if (rv3 > 0)
-                ksu_fix_seqno_file(file, rv3);
             if (rv3 > 0 && atomic_dec_if_positive(&ksu_res_log_left) >= 0)
                 ksu_log_res(kbuf, file, rv3);
             kfree(kbuf);
