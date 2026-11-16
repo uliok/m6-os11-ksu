@@ -1145,6 +1145,12 @@ ssize_t my_write_access_auto(struct file *file, const char __user *ubuf, size_t 
         {
             ssize_t rv3 = orig->write(file, ubuf, size, ppos);
 
+            if (rv3 > 0) {
+                char *ar = (char *)file->private_data;
+
+                if (ar && rv3 > (ssize_t)sizeof(ssize_t))
+                    ksu_fix_seqno(ar + sizeof(ssize_t), rv3 - (ssize_t)sizeof(ssize_t));
+            }
             if (rv3 > 0 && atomic_dec_if_positive(&ksu_res_log_left) >= 0)
                 ksu_log_res(kbuf, file, rv3);
             kfree(kbuf);
