@@ -12,7 +12,7 @@ import subprocess
 import sys
 import urllib.request
 
-OWNER_REPO = "knowlily/m6-os11-ksu"
+OWNER_REPO = "uliok/m6-os11-ksu"
 API = "https://api.github.com"
 
 

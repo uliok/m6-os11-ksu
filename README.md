@@ -58,7 +58,7 @@ for t in os11 os11sp7; do
            "Baka-SU/BakaSU d5e9e025b8b49155f8014684d64c91742b465f65 bakasu420 35252 com.resukisu.resukisu manual" \
            "tiann/KernelSU v3.3.1 ksu331 32680 me.weishu.kernelsu auto"; do
     set -- $m
-    gh workflow run build-ko-os11.yml --ref rel-150 -R knowlily/m6-os11-ksu \
+    gh workflow run build-ko-os11.yml --ref rel-150 -R uliok/m6-os11-ksu \
       -f target=$t -f ksu_repo=$1 -f ksu_ref=$2 \
       -f ksu_tarball="https://codeload.github.com/$1/tar.gz/$2" \
       -f ko_alias=$3 -f ksu_version=$4 -f mgr_pkg=$5 -f hook_mode=$6 \

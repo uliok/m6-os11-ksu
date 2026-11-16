@@ -29,7 +29,7 @@ ROOT = os.path.abspath(os.path.join(HERE, ".."))
 sys.path.insert(0, HERE)
 from target import get_target, ko_vermagic  # noqa: E402
 
-REPO = os.environ.get("KSU_KO_REPO", "knowlily/m6-os11-ksu")
+REPO = os.environ.get("KSU_KO_REPO", "uliok/m6-os11-ksu")
 WORKFLOW = os.environ.get("KSU_KO_WORKFLOW", "build-ko-os11.yml")
 JAILBREAK = os.path.abspath(os.path.join(ROOT, "..", "m6-jailbreak-core"))
 
