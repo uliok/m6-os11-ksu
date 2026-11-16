@@ -84,16 +84,28 @@ if _cnt == 1:
 elif _cnt > 1:
     src = src.replace(_fn, "static int ksu_ro_write(void *dst, const void *src, size_t n);\n\n" + _fn, 1)
 
-rep("""    write_op_fn my = my_write_context;
+_ctx_old = """    write_op_fn my = my_write_context;
     orig_context_write = *context_write;
-    ret = ksu_patch_text(context_write, &my, sizeof(my), KSU_PATCH_TEXT_FLUSH_DCACHE);""",
-    """    union { ksu_ctx4_fn f4; write_op_fn f3; } myu;
+    ret = ksu_patch_text(context_write, &my, sizeof(my), KSU_PATCH_TEXT_FLUSH_DCACHE);"""
+_ctx_new = """    union { ksu_ctx4_fn f4; write_op_fn f3; } myu;
     myu.f4 = my_write_context_auto;
     write_op_fn my = myu.f3;
     orig_context_write = *context_write;
     ret = ksu_ro_write(context_write, &my, sizeof(my)); /* DIRECTSTORE */
     if (ret)
-        goto unhook;""", "install-context")
+        goto unhook;"""
+if _ctx_old in src:
+    rep(_ctx_old, _ctx_new, "install-context")
+else:
+    # 新版 selinux_hide 在 orig 与 patch 之间插了 keep_backup 注释/赋值，拆成两段替换
+    rep("""    write_op_fn my = my_write_context;
+    orig_context_write = *context_write;""",
+        """    union { ksu_ctx4_fn f4; write_op_fn f3; } myu;
+    myu.f4 = my_write_context_auto;
+    write_op_fn my = myu.f3;
+    orig_context_write = *context_write;""", "install-context-my")
+    rep("""    ret = ksu_patch_text(context_write, &my, sizeof(my), KSU_PATCH_TEXT_FLUSH_DCACHE);""",
+        """    ret = ksu_ro_write(context_write, &my, sizeof(my)); /* DIRECTSTORE */""", "install-context-ret")
 
 rep("""    my = my_write_access;
     orig_access_write = *access_write;
