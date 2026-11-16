@@ -520,6 +520,12 @@ static int ksu_hide_killed(void)
 static void ksu_fops_apply(struct work_struct *w);
 static DECLARE_DELAYED_WORK(ksu_fops_work, ksu_fops_apply);
 static int ksu_fops_queued;
+/* 软重启/zygote 重启后 selinuxfs 的 inode 会换掉，fops 钩子跟着丢；
+ * 周期检查一次，发现不是我们的副本就重挂。只在 selinux_hide 开启时跑。 */
+static int ksu_hide_enabled;
+static int ksu_rehook_started;
+static void ksu_rehook_fn(struct work_struct *w);
+static DECLARE_DELAYED_WORK(ksu_rehook_work, ksu_rehook_fn);
 
 /* ===== 策略文件读取拦截（.read / .mmap）=====
  * 有些检测器不走 security_check_context()，而是直接把 /sys/fs/selinux/policy
@@ -595,6 +601,7 @@ static void ksu_fops_do(void)
     ksu_mark("do-start", (long)system_state);
     if (ksu_hide_killed()) {
         ksu_mark("do-killed", 0);
+        ksu_hide_enabled = 0;
         pr_info("selinux_hide: hide_off present, skip all hooks\n");
         return;
     }
@@ -619,6 +626,11 @@ static void ksu_fops_do(void)
     ksu_mark("do-done", ksu_fops_state);
     pr_info("selinux_hide: fops do ctx=%d acc=%d stock=%d status=%d state=%d\n", r1, r2, rp, rs,
             ksu_fops_state);
+    ksu_hide_enabled = ksu_fops_state;
+    if (ksu_fops_state && !ksu_rehook_started) {
+        ksu_rehook_started = 1;
+        schedule_delayed_work(&ksu_rehook_work, 5 * HZ);
+    }
 }
 
 static void ksu_fops_apply(struct work_struct *w)
@@ -629,6 +641,33 @@ static void ksu_fops_apply(struct work_struct *w)
         msleep(50);
     ksu_mark("work-start", (long)system_state);
     ksu_fops_do();
+}
+
+/* selinuxfs 的 inode 在软重启/zygote 重启后可能换新；检查当前挂的是不是我们的副本 */
+static int ksu_fops_ours(void)
+{
+    struct file *f = NULL;
+    struct inode *in = ksu_path_inode("/sys/fs/selinux/context", &f);
+    int ours;
+
+    if (!in)
+        return 0;
+    ours = (in->i_fop == &ksu_ctx_ops);
+    filp_close(f, NULL);
+    return ours;
+}
+
+static void ksu_rehook_fn(struct work_struct *w)
+{
+    if (!ksu_hide_enabled) {
+        ksu_rehook_started = 0;
+        return;
+    }
+    if (!ksu_fops_ours()) {
+        pr_info("selinux_hide: rehook after selinuxfs recreated (soft reboot)\n");
+        ksu_fops_do();
+    }
+    schedule_delayed_work(&ksu_rehook_work, 5 * HZ);
 }
 
 /* 调度：按"要写进去的那个指针"判断是哪个文件 */
@@ -656,11 +695,15 @@ static int ksu_ro_write(void *dst, const void *src, size_t n)
     if (want == (const void *)orig_context_write) {
         ksu_fops_restore("/sys/fs/selinux/context", ksu_ctx_orig);
         ksu_ctx_orig = NULL;
+        ksu_hide_enabled = 0;
+        ksu_rehook_started = 0;
         return 0;
     }
     if (want == (const void *)orig_access_write) {
         ksu_fops_restore("/sys/fs/selinux/access", ksu_acc_orig);
         ksu_acc_orig = NULL;
+        ksu_hide_enabled = 0;
+        ksu_rehook_started = 0;
         return 0;
     }
     pr_info("selinux_hide: ro_write unknown want=0x%lx slot=0x%lx\n", (unsigned long)want, (unsigned long)dst);
