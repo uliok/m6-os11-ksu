@@ -598,6 +598,76 @@ static int ksu_fops_patch_policy(void)
 #define KSU_FOPS_WRAP 1
 #endif
 
+/* ===== 全量 access 过滤：用 backup_sepolicy（KernelSU 注入前的 stock 策略）
+ * 重算 security_compute_av_user 的 avd。只影响 userspace probes，
+ * 内核内部 security_compute_av/AVC 不动，root 自己照常工作。
+ * 比 pair 匹配强的地方：sentinel/正控/负控/system_server self 都按 stock 回答，
+ * 不会出现「整字清零」被交叉校验抓到。
+ */
+struct ksu_av_args {
+    u32 ssid;
+    u32 tsid;
+    u16 tclass;
+    void *avd;
+};
+
+static struct kretprobe ksu_av_krp;
+static int ksu_av_active;
+
+static int __maybe_unused ksu_av_entry(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+    struct ksu_av_args *a = (struct ksu_av_args *)ri->data;
+
+    /* 6.1: security_compute_av_user(state, ssid, tsid, tclass, avd) */
+    a->ssid = (u32)regs->regs[1];
+    a->tsid = (u32)regs->regs[2];
+    a->tclass = (u16)regs->regs[3];
+    a->avd = (void *)regs->regs[4];
+    return 0;
+}
+
+static int __maybe_unused ksu_av_ret(struct kretprobe_instance *ri, struct pt_regs *regs)
+{
+    struct ksu_av_args *a = (struct ksu_av_args *)ri->data;
+
+    if (ksu_av_active && backup_sepolicy && a->avd)
+        security_compute_av_user_with_policy(backup_sepolicy, a->ssid, a->tsid, a->tclass,
+                                             (struct av_decision *)a->avd);
+    return 0;
+}
+
+static int __maybe_unused ksu_av_hook(void)
+{
+    int r;
+
+    if (ksu_av_active)
+        return 0;
+    if (!backup_sepolicy)
+        return -EAGAIN;
+    memset(&ksu_av_krp, 0, sizeof(ksu_av_krp));
+    ksu_av_krp.kp.symbol_name = "security_compute_av_user";
+    ksu_av_krp.entry_handler = ksu_av_entry;
+    ksu_av_krp.handler = ksu_av_ret;
+    ksu_av_krp.data_size = sizeof(struct ksu_av_args);
+    ksu_av_krp.maxactive = 64;
+    r = register_kretprobe(&ksu_av_krp);
+    if (r) {
+        pr_info("selinux_hide: kretprobe security_compute_av_user FAILED %d\n", r);
+        return r;
+    }
+    ksu_av_active = 1;
+    pr_info("selinux_hide: kretprobe security_compute_av_user OK\n");
+    return 0;
+}
+
+static void ksu_av_unhook(void)
+{
+    if (!ksu_av_active)
+        return;
+    unregister_kretprobe(&ksu_av_krp);
+    ksu_av_active = 0;
+}
+
 static void ksu_fops_do(void)
 {
     int r1, r2, rp, rs = -1;
@@ -707,6 +777,7 @@ static int ksu_ro_write(void *dst, const void *src, size_t n)
     }
 
     if (want == (const void *)orig_context_write) {
+        ksu_av_unhook();
         ksu_fops_restore("/sys/fs/selinux/context", ksu_ctx_orig);
         ksu_ctx_orig = NULL;
         ksu_hide_enabled = 0;
@@ -1101,6 +1172,38 @@ static int ksu_setprocattr_hook(void)
     pr_info("selinux_hide: kretprobe selinux_setprocattr OK\n");
     return 0;
 }
+static int ksu_full_access_filter(struct file *file, const char *q, size_t size)
+{
+    char scon[256], tcon[256], resp[256];
+    unsigned short tclass;
+    u32 ssid, tsid;
+    struct av_decision avd;
+    char *ar;
+    int len;
+
+    (void)size;
+    if (!backup_sepolicy)
+        return 0;
+    if (sscanf(q, "%255s %255s %hu", scon, tcon, &tclass) != 3)
+        return 0;
+    if (security_context_to_sid_with_policy(backup_sepolicy, scon, strlen(scon), &ssid, SECSID_NULL,
+                                           GFP_KERNEL, NULL, NULL))
+        return 0;
+    if (security_context_to_sid_with_policy(backup_sepolicy, tcon, strlen(tcon), &tsid, SECSID_NULL,
+                                           GFP_KERNEL, NULL, NULL))
+        return 0;
+    security_compute_av_user_with_policy(backup_sepolicy, ssid, tsid, tclass, &avd);
+    avd.seqno = 1; /* stock 6.10 之前的干净值，和 DirtySepolicy 的判据一致 */
+    len = scnprintf(resp, sizeof(resp), "%x %x %x %x %u %x", avd.allowed, 0xffffffff, avd.auditallow,
+                    avd.auditdeny, avd.seqno, avd.flags);
+    ar = (char *)file->private_data;
+    if (!ar || len <= 0 || len > (int)(PAGE_SIZE - sizeof(ssize_t)))
+        return 0;
+    *(ssize_t *)ar = len;
+    memcpy(ar + sizeof(ssize_t), resp, (size_t)len);
+    return 1;
+}
+
 ssize_t my_write_access_auto(struct file *file, const char __user *ubuf, size_t size, loff_t *ppos)
 {
     const struct file_operations *orig = ksu_acc_orig;
@@ -1127,7 +1230,7 @@ ssize_t my_write_access_auto(struct file *file, const char __user *ubuf, size_t 
         kbuf[size] = 0;
         if (ksu_is_sentinel(kbuf, size)) {
             kfree(kbuf);
-            return -EPERM;
+            return -EINVAL;
         }
         ok = ksu_ctx_allowed(kbuf, size);
         ksu_hook_log("HACC", kbuf, size, ok);
@@ -1139,21 +1242,6 @@ ssize_t my_write_access_auto(struct file *file, const char __user *ubuf, size_t 
                 pr_info("selinux_hide: ACC uid=%d ok=%d '%s'\n",
                         current_uid().val, ok, kbuf);
         }
-        if (ok && ksu_pair_denied(kbuf, size)) { /* 规则层：照常算，但把 allowed 位图清零 */
-            ssize_t rv2;
-
-            pr_info("selinux_hide: pair deny uid=%d\n", current_uid().val);
-            rv2 = orig->write(file, ubuf, size, ppos);
-            if (rv2 > 0) {
-                ksu_zero_allowed(file, rv2);
-                if (atomic_dec_if_positive(&ksu_res_log_left) >= 0)
-                    ksu_log_res(kbuf, file, rv2);
-                kfree(kbuf);
-                return rv2;
-            }
-            kfree(kbuf);
-            return -EINVAL; /* 兜底：EINVAL 对方当「不存在」，同样静默 */
-        }
         if (!ok) {
             pr_info("selinux_hide: access deny uid=%d '%s'\n", current_uid().val, kbuf);
             kfree(kbuf);
@@ -1162,11 +1250,15 @@ ssize_t my_write_access_auto(struct file *file, const char __user *ubuf, size_t 
         {
             ssize_t rv3 = orig->write(file, ubuf, size, ppos);
 
-            if (rv3 > 0) {
-                char *ar = (char *)file->private_data;
+            if (rv3 > 0 && !ksu_full_access_filter(file, kbuf, size)) {
+                if (ksu_pair_denied(kbuf, size))
+                    ksu_zero_allowed(file, rv3);
+                else {
+                    char *ar = (char *)file->private_data;
 
-                if (ar && rv3 > (ssize_t)sizeof(ssize_t))
-                    ksu_fix_seqno(ar + sizeof(ssize_t), rv3 - (ssize_t)sizeof(ssize_t));
+                    if (ar && rv3 > (ssize_t)sizeof(ssize_t))
+                        ksu_fix_seqno(ar + sizeof(ssize_t), rv3 - (ssize_t)sizeof(ssize_t));
+                }
             }
             if (rv3 > 0 && atomic_dec_if_positive(&ksu_res_log_left) >= 0)
                 ksu_log_res(kbuf, file, rv3);
