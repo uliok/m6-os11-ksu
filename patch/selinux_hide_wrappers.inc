@@ -578,6 +578,10 @@ static int ksu_fops_patch_policy(void)
     if (!in)
         return -ENOENT;
     cur = in->i_fop;
+    if (cur == &ksu_pol_ops) { /* 已经装过，别把自己的副本当 orig（会造成 read 递归） */
+        filp_close(f, NULL);
+        return 0;
+    }
     ksu_pol_orig = cur;
     memcpy(&ksu_pol_ops, cur, sizeof(ksu_pol_ops));
     ksu_pol_ops.read = my_pol_read;
@@ -643,18 +647,28 @@ static void ksu_fops_apply(struct work_struct *w)
     ksu_fops_do();
 }
 
-/* selinuxfs 的 inode 在软重启/zygote 重启后可能换新；检查当前挂的是不是我们的副本 */
-static int ksu_fops_ours(void)
+/* selinuxfs 的 inode 在软重启/zygote 重启后可能换新；检查当前挂的是不是我们的副本。
+ * policy/status/access 任何一个没挂上都要重跑，不能只看 context：软重启后
+ * policy 的 -ENOENT 会让 do-done=1 但策略文件仍然裸奔。 */
+static int ksu_fops_path_ours(const char *path, const struct file_operations *ops)
 {
     struct file *f = NULL;
-    struct inode *in = ksu_path_inode("/sys/fs/selinux/context", &f);
+    struct inode *in = ksu_path_inode(path, &f);
     int ours;
 
     if (!in)
         return 0;
-    ours = (in->i_fop == &ksu_ctx_ops);
+    ours = (in->i_fop == ops);
     filp_close(f, NULL);
     return ours;
+}
+
+static int ksu_fops_ours(void)
+{
+    return ksu_fops_path_ours("/sys/fs/selinux/context", &ksu_ctx_ops) &&
+           ksu_fops_path_ours("/sys/fs/selinux/access", &ksu_acc_ops) &&
+           ksu_fops_path_ours("/sys/fs/selinux/policy", &ksu_pol_ops) &&
+           ksu_fops_path_ours("/sys/fs/selinux/status", &ksu_status_ops);
 }
 
 static void ksu_rehook_fn(struct work_struct *w)
