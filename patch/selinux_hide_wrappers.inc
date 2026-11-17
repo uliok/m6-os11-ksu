@@ -945,8 +945,11 @@ static void ksu_fix_seqno(char *d, ssize_t n)
         ssize_t s0 = start[4], e0 = end[4];
         ssize_t delta = (e0 - s0) - 1;
 
-        if (delta <= 0)
-            return; /* 本来就是一个字符（多半已经是 1） */
+        if (delta <= 0) {
+            if (e0 > s0)
+                d[s0] = '1'; /* 单字符也可能是 2..9，不能假设已经是 1 */
+            return;
+        }
         d[s0] = '1';
         memmove(d + s0 + 1, d + e0, (size_t)(n - e0));
         for (i = n - delta; i < n; i++)
