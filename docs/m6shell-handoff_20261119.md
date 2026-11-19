@@ -66,6 +66,32 @@
 - FinaSU 的路径隐藏页保存了 `/data/local/tmp`；新增规则即时，修改/删除按页面提示处理；软重启不会卸载 LKM，需要重载参数时用完整重启。
 - SUSFS 规则会把 `/data/local/tmp` 权限 relax 到 0777；`hide_from_apps=1` 只隐藏 App，shell/root 仍可见，正常。
 
+### SUSFS 配置现状（2026-11-19 追加）
+
+FinaSU 管理器里已保存并应用到本次启动：
+
+- 路径隐藏：**`/data/adb`**、**`/data/local/tmp`**（2 条）
+- 扩展 → 隐藏模块名称：**`kernelsu`**（内核已确认；`/proc/modules` 已看不到 `kernelsu`，但 `/sys/module/kernelsu` 仍在）
+- 扩展 → 隐藏挂载前缀：**`/data/adb`**（内核已确认）
+- 基础设置：隐藏 SUSFS 挂载 = **不管理**（开启会返回 `SUSFS returned error -2`，不要开）；SUSFS 日志 = **关闭**；AVC 伪装 = **关闭**；uname/cmdline = 不管理
+
+影响：
+
+- M6Shell 的 `grep kernelsu /proc/modules` 验收会失败，但 root 模块实际在 `/sys/module/kernelsu`，不是没加载；后续 App 应优先看 sysfs。
+- `/data/adb` 的路径/挂载隐藏对 App 生效；shell/root 仍可访问，这是 `hide_from_apps=1` 的正常行为。
+- `/data/local/tmp` 对 App 隐藏，但 shell 仍可见；M6Shell 的 `.w9` 由 shell 执行，不受影响。
+- 未配置 maps / 文件重定向 / props 伪装；这些不是当前必需，避免误伤。
+
+root 复核命令：
+
+```sh
+cat /proc/susfs_path
+cat /proc/susfs_hide_modules
+cat /proc/susfs_hide_mounts
+cat /proc/susfs_enable_log
+cat /proc/susfs_avc_spoof
+```
+
 ## 6. 已完成 / 已验证
 
 - 9.44 → av2 全量 SELinux access filter；DirtySepolicy OK；春秋 Native check-Eros v4.6.3 的 SELinux 项消失（只剩 USB/风险应用/TEE）。
