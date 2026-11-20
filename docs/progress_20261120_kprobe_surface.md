@@ -343,3 +343,14 @@ su -c 'grep setresuid /sys/kernel/debug/kprobes/list'   # 有 = 走了兜底；�
 
 判定标准：**管理器首页「已安装」+ `su -c id` 正常**，再看 `kprobes/list` 里有没有
 `__arm64_sys_setresuid`。两个都满足才是这一支通过。
+
+
+### 9.2 第一发构建结果（2026-11-20）
+
+- run [44705262083](https://github.com/uliok/m6-os11-ksu/actions/runs/44705262083) **success**
+- 产物：`kernelsu_finasu163tbl_os11sp7.ko`，730,696 B，md5 `6cca4a4583874e202503aebaa8cb98ab`
+- vermagic：`6.1.157-android14-11-g7db56fb8f741 SMP preempt mod_unload modversions aarch64`
+- ko 里已确认含 7 条 `ksu-sp-tbl:` 日志串和 `ksu: setresuid via sys_call_table`
+- 编译只证明语法/链接通过；**写原语到底通不通，要真机看 `dmesg | grep ksu-sp-tbl`**
+- 这一发沿用 `ksu_debug=true`（和 SP7 一致），所以 `/sys/module/kernelsu` 还在；
+  验证通过后再出 `ksu_debug=false` 的发布版
