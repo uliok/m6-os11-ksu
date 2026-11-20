@@ -47,6 +47,10 @@ on:
         description: "打我们的 SELinux 隐藏补丁（false = 原厂实现，给别的管理器保稳定）"
         type: boolean
         default: true
+      last_match:
+        description: "把 1.6.4 的 first-match 回退成 last-match（本机符号有重复时用）"
+        type: boolean
+        default: false
       ko_alias:
         description: "产物 ko 的别名前缀（如 sukisu / finasu），留空则用原文件名"
         default: ""
@@ -196,6 +200,13 @@ jobs:
           [ -n "$KD" ] || { echo "!! setup.sh 没有产出源码目录"; exit 1; }
           grep -rn "KERNEL_SU_UAPI_VERSION" "$KD"/uapi/supercall.h 2>/dev/null || true
           head -20 "$KD"/kernel/Makefile
+
+      - name: 可选回退 first-match
+        if: ${{ inputs.last_match }}
+        run: |
+          cd work/Code_Opensource/kernel
+          KD=$(ls -d KernelSU KernelSU-Next 2>/dev/null | head -1)
+          [ -n "$KD" ] && python3 "$GITHUB_WORKSPACE/patch/revert_first_match.py" "$KD" || true
 
       - name: 应用源码补丁
         run: |
