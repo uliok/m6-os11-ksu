@@ -238,6 +238,108 @@ static struct kprobe ksu_sp_setresuid_kp = {
     .pre_handler = ksu_sp_setresuid_pre,
 };
 
+/* 2026-11-20 方案 B（单点试验）：setresuid 改走 sys_call_table 表项替换。
+ * 目的：不建 struct kprobe，kprobes/list 里没有条目；并且脱离 kprobe 原子上下文，
+ * 直接调 ksu_handle_setresuid()，不再需要 task_work。
+ * 写表走本文件的 ksu_syscall_table_hook()（phys + fixmap + stop_machine）。
+ * 这台机器以前出现过「ret=0 但回读没变」，所以先拿 ni_syscall 空槽做写探针，
+ * 确认能写、能还原，再动 setresuid；任何一步不成就退回 kprobe，保证 su 不断。
+ */
+#define KSU_SP_SETRESUID_VIA_TABLE 1
+
+#if KSU_SP_SETRESUID_VIA_TABLE
+static syscall_fn_t ksu_sp_orig_setresuid;
+
+static long __nocfi ksu_sp_sys_setresuid(const struct pt_regs *regs)
+{
+    ksu_handle_setresuid((uid_t)regs->regs[0],
+                         (uid_t)regs->regs[1],
+                         (uid_t)regs->regs[2]);
+    return ksu_sp_orig_setresuid(regs);
+}
+
+static long __nocfi ksu_sp_table_test_fn(const struct pt_regs *regs)
+{
+    return -ENOSYS;
+}
+
+static bool ksu_sp_table_write_probe(void)
+{
+    int slot = -1, i;
+    unsigned long ni;
+    syscall_fn_t after;
+
+    if (!ksu_syscall_table) {
+        pr_alert(\"ksu-sp-tbl: sys_call_table is NULL, skip\\n\");
+        return false;
+    }
+
+    ni = ksu_sc_ni_addr;
+    if (!ni)
+        ni = (unsigned long)ksu_resolve_symbol_for_functable_hook(\"__arm64_sys_ni_syscall\");
+    if (!ni)
+        return false;
+
+    /* 从表尾往前找一个 ni_syscall 空槽，避开 dispatcher 已占的槽 */
+    for (i = __NR_syscalls - 1; i >= 0; i--) {
+        if ((unsigned long)READ_ONCE(ksu_syscall_table[i]) == ni) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0 || slot == ksu_dispatcher_nr)
+        return false;
+
+    pr_alert(\"ksu-sp-tbl: probe table=%px ni=%lx slot=%d\\n\",
+             (void *)ksu_syscall_table, ni, slot);
+
+    ksu_syscall_table_hook(slot, ksu_sp_table_test_fn, NULL);
+    after = READ_ONCE(ksu_syscall_table[slot]);
+    if (after != ksu_sp_table_test_fn) {
+        pr_alert(\"ksu-sp-tbl: write probe FAILED slot=%d after=%px\\n\",
+                 slot, (void *)after);
+        /* 没写进去也要清掉跟踪项，别让 exit 时再碰一次 */
+        ksu_syscall_table_unhook(slot);
+        return false;
+    }
+
+    ksu_syscall_table_unhook(slot);
+    if (READ_ONCE(ksu_syscall_table[slot]) == ksu_sp_table_test_fn) {
+        pr_alert(\"ksu-sp-tbl: probe restore FAILED slot=%d -> abort\\n\", slot);
+        return false;
+    }
+    pr_alert(\"ksu-sp-tbl: write probe OK slot=%d\\n\", slot);
+    return true;
+}
+
+static bool ksu_sp_install_setresuid_table(void)
+{
+    syscall_fn_t before, after;
+
+    if (!ksu_syscall_table)
+        return false;
+
+    before = READ_ONCE(ksu_syscall_table[__NR_setresuid]);
+    if (before == ksu_sp_sys_setresuid)
+        return true;
+    if (!before)
+        return false;
+
+    ksu_syscall_table_hook(__NR_setresuid, ksu_sp_sys_setresuid,
+                           &ksu_sp_orig_setresuid);
+    after = READ_ONCE(ksu_syscall_table[__NR_setresuid]);
+
+    if (after != ksu_sp_sys_setresuid || !ksu_sp_orig_setresuid) {
+        pr_alert(\"ksu-sp-tbl: setresuid FAILED before=%px after=%px orig=%px\\n\",
+                 (void *)before, (void *)after, (void *)ksu_sp_orig_setresuid);
+        return false;
+    }
+    pr_alert(\"ksu-sp-tbl: setresuid OK %px -> %px (orig=%px)\\n\",
+             (void *)before, (void *)after, (void *)ksu_sp_orig_setresuid);
+    return true;
+}
+#endif
+
 /* 2026-10-21: su 重定向 —— 把 execve("/system/bin/su") 换成 App 自己 lib 目录里的
  * ksud 副本（标签 apk_data_file，untrusted_app 拥有 execute 权限），
  * 不依赖 sys_call_table，也不需要 SELinux permissive。
@@ -642,9 +744,18 @@ void ksu_sp_hooks_init(void)
         return;
     ksu_sp_inited = true;
 
+#if KSU_SP_SETRESUID_VIA_TABLE
+    if (ksu_sp_table_write_probe() && ksu_sp_install_setresuid_table()) {
+        rc = 0;
+        pr_alert(\"ksu: setresuid via sys_call_table (no kprobe)\\n\");
+    } else {
+        rc = register_kprobe(&ksu_sp_setresuid_kp);
+        pr_alert(\"ksu: setresuid table failed -> kprobe fallback rc=%d\\n\", rc);
+    }
+#else
     rc = register_kprobe(&ksu_sp_setresuid_kp);
-
-    pr_alert("ksu: setresuid kprobe rc=%d\\n", rc);
+    pr_alert(\"ksu: setresuid kprobe rc=%d\\n\", rc);
+#endif
     rc2 = register_kprobe(&ksu_su_exec_kp);
     rc3 = register_kprobe(&ksu_exec_entry_kp);
     rc4 = register_kprobe(&ksu_bprm_begin_kp);

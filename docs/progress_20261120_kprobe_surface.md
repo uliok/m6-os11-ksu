@@ -18,10 +18,12 @@
 3. **模块痕迹只剩 `/proc/modules`。** `core/init.c:273` 的 `kobject_del()` 已经把
    `/sys/module/kernelsu` 摘掉了（前提：`CONFIG_KSU_DEBUG` 关闭）。`/proc/modules` 还在，
    但 App 域通常读不到（脚本里验证）；本机 `/proc/kallsyms` 连 shell 都 denied。
-4. **要「清零探针」，这台机器上有现成可行的一条路**：把 syscall 钩子改成
-   `sys_call_table` 指针替换，用 FinaSU 自带的 `ksu_patch_text()`
-   （`feature/netisolate.c:580` 已经这么干了，`hook/arm64/patch_memory.c:176` 是原语）。
-   这条路不写 text、不建 `struct kprobe`、`kprobes/list` 里一条都不会有。
+4. **「清零探针」的候选路线是 `sys_call_table` 指针替换**：用 FinaSU 自带的
+   `ksu_patch_text()`（`hook/arm64/patch_memory.c:176` 是原语，`feature/netisolate.c:580`
+   用它换表项）。这条路不写 text、不建 `struct kprobe`、`kprobes/list` 里一条都不会有。
+   **但本机 2026-10-21 的 dispatcher 实测是「写返回成功、回读不落地」**
+   （`ksu-deliver/docs/02-su问题与解决方案.md`），所以别假设它一定通 —— 本分支先用
+   一个 ni_syscall 空槽做零风险写探针，确认能写、能还原，再动 setresuid；失败就退回 kprobe。
 
 一句话：**别去藏 kprobes/list（root-only，收益 0）；要减的是热路径探针，要换的是钩子后端。**
 
@@ -182,7 +184,13 @@ schedule_work(&ksu_sp_su_hooks_work);
 
 ---
 
-## 5. 方案 B：把 syscall 钩子全部换成 `sys_call_table` 指针替换（推荐）
+## 5. 方案 B：把 syscall 钩子全部换成 `sys_call_table` 指针替换
+
+> **2026-11-20 更正**：netisolate 用的是同一条原语，但本机 dispatcher 的实测结果是
+> `readback=...c088c want=...3088` —— 写没落地。所以这支不是「已经验证可行」，
+> 而是**先验证原语**：`feat/syscall-table-setresuid` 分支里加了一个 ni_syscall 空槽
+> 写探针（写进去 → 回读 → 还原 → 再回读），任何一步不成就退回 kprobe。
+> 日志 tag：`ksu-sp-tbl:`。
 
 **为什么可行**：`feature/netisolate.c:580` 已经在用同一条路：
 
@@ -309,7 +317,25 @@ ksu_sp_sys_call_table = ksu_resolve_symbol_for_functable_hook("sys_call_table");
 
 ## 9. 下一步
 
+- [x] 方案 B 第一支：`feat/syscall-table-setresuid`（只换 setresuid + 空槽写探针 + kprobe 兜底）
+- [ ] 真机跑这一支，按 `ksu-sp-tbl:` 日志判定写原语到底通不通
 - [ ] 真机跑 `scripts/ksu-surface-scan.sh`，把 `/proc/modules`、`kallsyms`、debugfs 的可读性钉死
-- [ ] 方案 A 先落地（改动小，可回滚），验证 su 全链路
-- [ ] 方案 B 单独一支分支做 A/B，先只换 `setresuid`，再换 exec/stat
+- [ ] 写原语通了再换 exec/stat；不通就回方案 A
 - [ ] 把 `begin_new_exec` 是否可去用日志证实后再删
+
+### 9.1 这一支怎么判读
+
+构建：`gh workflow run build-ko-os11.yml --ref feat/syscall-table-setresuid ...`（参数同平时）。
+
+装载后：
+
+```sh
+su -c 'dmesg | grep ksu-sp-tbl'
+# 期望二选一：
+#   write probe OK slot=N / setresuid OK ... -> 表项替换生效，kprobes/list 里没有 __arm64_sys_setresuid
+#   write probe FAILED slot=N after=...      -> 写原语不落地，已自动退回 kprobe，su 不受影响
+su -c 'grep setresuid /sys/kernel/debug/kprobes/list'   # 有 = 走了兜底；无 = 表项替换成功
+```
+
+判定标准：**管理器首页「已安装」+ `su -c id` 正常**，再看 `kprobes/list` 里有没有
+`__arm64_sys_setresuid`。两个都满足才是这一支通过。
