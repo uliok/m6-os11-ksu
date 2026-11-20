@@ -354,3 +354,51 @@ su -c 'grep setresuid /sys/kernel/debug/kprobes/list'   # 有 = 走了兜底；�
 - 编译只证明语法/链接通过；**写原语到底通不通，要真机看 `dmesg | grep ksu-sp-tbl`**
 - 这一发沿用 `ksu_debug=true`（和 SP7 一致），所以 `/sys/module/kernelsu` 还在；
   验证通过后再出 `ksu_debug=false` 的发布版
+
+## 10. 真机裁决（2026-11-20 22:5x，os11 / g84ffa64b710b）
+
+设备实际内核是 **os11 = 6.1.157-android14-11-g84ffa64b710b**（MagicOS 11 SP6C00E110），
+不是 SP7；`finasu164tbl` 按 `target=os11` 重编（730,696 B，md5 `aa710fc0…`），
+经 `.w9` 的 exploit-1022o + kgo.sh 装载。
+
+```
+KernelSU: ksu-sp-tbl: probe table=ffffffe62a730a80 ni=ffffffe62a3c088c slot=423
+KernelSU: ksu: patch dst=ffffffe62a7317b8 len=8 ret=0 fixmap_read=ffffffe62a3c088c
+KernelSU: ksu-sp-tbl: write probe FAILED slot=423 after=ffffffe62a3c088c
+KernelSU: ksu: setresuid table failed -> kprobe fallback rc=0
+```
+
+**方案 B 在这台内核上不成立**：`ksu_patch_text`（fixmap）返回 0，回读仍是原值，
+和 2026-10-21 的 `readback=...c088c` 完全一致。ko 自动退回 kprobe，su 链路未断。
+
+探针注册实况（dmesg）：
+
+| 探针 | 结果 |
+|---|---|
+| execwrap kprobe + kretprobe | 0 / 0 |
+| su-check[0..5]（6 个） | 全部 0 |
+| setresuid（表项失败兜底） | 0 |
+| exec-entry (`__arm64_sys_execve`) | 0 |
+| `do_execveat_common` / `exec_binprm` / `begin_new_exec` | **-2（ENOENT）** |
+
+后三个符号本机解析不到 ⇒ shell 直接 exec `su` 不会重定向（`/data/local/tmp/su`
+实测仍是 uid 2000）。管理器走 `/data/adb/ksu/bin/su`（ksud）不受影响。
+
+`force_patch_table.c` 的第二级 `vm_map_ram` **本次没有被调用过**（dmesg 无
+`fallback phys walk`），因为这套 ko 走的是 `ksu_syscall_table_hook`（fixmap）。
+若以后还要再试表项，这是唯一没实测的写原语。
+
+## 11. 方案 A 落地：6 → 2
+
+2026-11-20 决定：不再赌写原语，先把热路径探针砍掉。
+
+`su-check` 的 6 个符号里，4 个 syscall 级与 2 个 VFS 级完全重叠：
+
+- `faccessat` / `faccessat2` → 都进 `do_faccessat`
+- `newfstatat` / `statx` / `fstatat64` → 都进 `vfs_statx`
+
+所以 `apply_sc_inject.py` 里加 `#define KSU_SP_SU_CHECK_SYSCALL_LEVEL 0`，
+默认只注册 `do_faccessat` + `vfs_statx`；要做 6 探针对照时把宏改 1。
+
+效果（预期）：一次 `stat()` 由 2 次命中降为 1 次，`faccessat` 由 2~3 次降为 1 次；
+su 语义不变（路径参数都在 regs[1]，handler 不用改）。

@@ -723,12 +723,18 @@ static int ksu_su_check_pre(struct kprobe *p, struct pt_regs *regs)
     return 0;
 }
 
+/* 2026-11-20 真机：stat() 一次同时命中 __arm64_sys_newfstatat + vfs_statx，faccessat
+ * 同理（faccessat2 也走 do_faccessat）。syscall 级 4 个与 VFS 级 2 个覆盖完全重叠，
+ * 保留 VFS 必经点即可，热路径命中数直接减半。要做 6 探针对照时把宏改 1。 */
+#define KSU_SP_SU_CHECK_SYSCALL_LEVEL 0
 static struct kprobe ksu_su_check_kps[] = {
+#if KSU_SP_SU_CHECK_SYSCALL_LEVEL
     {.symbol_name = "__arm64_sys_faccessat",  .pre_handler = ksu_su_check_pre},
     {.symbol_name = "__arm64_sys_faccessat2", .pre_handler = ksu_su_check_pre},
     {.symbol_name = "__arm64_sys_newfstatat", .pre_handler = ksu_su_check_pre},
     {.symbol_name = "__arm64_sys_statx",      .pre_handler = ksu_su_check_pre},
-    /* 兜底：万一 bionic 的入口不叫 __arm64_sys_*，这两个是 VFS 层必经点 */
+#endif
+    /* VFS 必经点：faccessat/faccessat2 -> do_faccessat；newfstatat/statx/fstatat64 -> vfs_statx */
     {.symbol_name = "do_faccessat",           .pre_handler = ksu_su_check_pre},
     {.symbol_name = "vfs_statx",              .pre_handler = ksu_su_check_pre},
 };
