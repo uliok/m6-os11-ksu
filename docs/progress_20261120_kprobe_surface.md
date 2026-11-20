@@ -15,9 +15,13 @@
    `CONFIG_FUNCTION_TRACER is not set`，kprobe 走的是 **BRK 型**（不是 ftrace 型）：
    每次命中都是一次异常陷入。`vfs_statx` / `do_faccessat` 是全系统每次 stat/access 都过的点，
    等于给整机加了一层全局开销——这既能量出时延，也是实打实的性能损耗。
-3. **模块痕迹只剩 `/proc/modules`。** `core/init.c:273` 的 `kobject_del()` 已经把
-   `/sys/module/kernelsu` 摘掉了（前提：`CONFIG_KSU_DEBUG` 关闭）。`/proc/modules` 还在，
-   但 App 域通常读不到（脚本里验证）；本机 `/proc/kallsyms` 连 shell 都 denied。
+3. **模块痕迹有两条，其中一条比 kprobe 更值得先处理。** 现役 SP7 ko 是
+   `ksu_debug=true` 编的（构建日志 `CONFIG_KSU_DEBUG=y`）——`core/init.c:273` 的
+   `kobject_del()` 包在 `#ifndef CONFIG_KSU_DEBUG` 里，所以 `/sys/module/kernelsu`
+   **还在**，`parameters/` 下的 `su_path`、`sc_table`、`mgr_pkgs` 都是 0644，
+   普通 App 能读。`/proc/modules` 也在（App 域多半读不到）。
+   要消掉前者：要么 `ksu_debug=false` 重编，要么把 `kobject_del` 移出 DEBUG 条件
+   （保留 ksud debug 能力的同时摘掉 sysfs）。
 4. **「清零探针」的候选路线是 `sys_call_table` 指针替换**：用 FinaSU 自带的
    `ksu_patch_text()`（`hook/arm64/patch_memory.c:176` 是原语，`feature/netisolate.c:580`
    用它换表项）。这条路不写 text、不建 `struct kprobe`、`kprobes/list` 里一条都不会有。
@@ -86,7 +90,7 @@
 | `/sys/kernel/debug/kprobes/list` | ✗ | ✗ | ✓（若 debugfs 挂载） | 唯一枚举口，0400 |
 | `kprobe_events` | 空 | 空 | 空 | KSU 用 `register_kprobe`，不写 tracefs |
 | `/proc/modules` | 多数 ROM ✗ | ✓ | ✓ | 模块名 `kernelsu`，`kobject_del` 管不到它 |
-| `/sys/module/kernelsu` | ✗ | ✗ | ✗ | 已被 `kobject_del()` 摘掉（非 DEBUG 构建） |
+| `/sys/module/kernelsu` | **✓（SP7）** | ✓ | ✓ | 现役 ko 是 DEBUG=y，`kobject_del` 被编掉；`parameters/*` 0644 可读 |
 | `/proc/kallsyms` | 多数 ✗ | 本机 ✗ | ✓ | 模块符号带 `[kernelsu]` |
 | stat/access 时延 | **可测** | 可测 | 可测 | BRK 型探针，热路径尤其明显 |
 | access/stat/execve 行为一致性 | **可测** | 可测 | 可测 | 探针改写路径时最容易出破绽 |
