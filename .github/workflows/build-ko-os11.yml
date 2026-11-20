@@ -59,6 +59,10 @@ on:
         description: "编进 ko 的默认管理器包名（如 com.resukisu.resukisu）；留空=沿用源码默认"
         default: ""
         required: false
+      sp_table:
+        description: "方案B：setresuid 走 sys_call_table（1=开 / 0=只用 kprobe）"
+        default: "1"
+        required: false
 
 jobs:
   build:
@@ -199,7 +203,7 @@ jobs:
           KSUDIR=$(ls -d KernelSU KernelSU-Next 2>/dev/null | head -1)
           echo "KernelSU 源码目录: ${KSUDIR:-（没找到）}"
           if [ -n "$KSUDIR" ] && [ -f "$GITHUB_WORKSPACE/patch/apply_sc_inject.py" ]; then
-            python3 "$GITHUB_WORKSPACE/patch/apply_sc_inject.py" "$KSUDIR" || true
+            KSU_SP_TABLE="${{ inputs.sp_table }}" python3 "$GITHUB_WORKSPACE/patch/apply_sc_inject.py" "$KSUDIR" || true
             echo "---- 注入结果自检 ----"
             grep -n "ksu_sc_table_addr\|skip redirect" "$KSUDIR/kernel/hook/arm64/syscall_hook.c" | head -4 || true
             grep -n "skip redirect" "$KSUDIR/kernel/hook/syscall_hook_manager.c" | head -2 || true

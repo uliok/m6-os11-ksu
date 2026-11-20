@@ -791,6 +791,9 @@ void ksu_sp_hooks_init(void)
 
     if hit == 0:
         return "skip: anchors not found"
+    if os.environ.get("KSU_SP_TABLE", "1").strip() == "0":
+        s = s.replace("#define KSU_SP_SETRESUID_VIA_TABLE 1",
+                      "#define KSU_SP_SETRESUID_VIA_TABLE 0", 1)
     save(p, s, crlf)
     return "patched(%d)" % hit
 
