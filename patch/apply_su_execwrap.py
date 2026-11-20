@@ -121,7 +121,9 @@ static struct kretprobe ksu_execwrap_ret_kp = {
 
 '''
 
-REG_OLD = "    rc = register_kprobe(&ksu_sp_setresuid_kp);\n"
+# 2026-11-20：setresuid 改走 sys_call_table 后，原锚点会出现两次（表成功/兜底各一次），
+# 改用 rc2 这一行：它在 ksu_sp_hooks_init 里始终唯一且无条件执行。
+REG_OLD = "    rc2 = register_kprobe(&ksu_su_exec_kp);\n"
 REG_NEW = REG_OLD + """    {
         int rc_w = register_kprobe(&ksu_execwrap_kp);
         int rc_wr = register_kretprobe(&ksu_execwrap_ret_kp);
