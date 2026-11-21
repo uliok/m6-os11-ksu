@@ -66,3 +66,32 @@
 ## 待办
 
 - 真机装载：三家 × 原版/去探针逐个验证（`kprobes/list`、`su` 直执、`test -x /system/bin/su`、SELinux Hide 开关生效）
+
+
+## CVE-2026-99491 路线并入（App 9.49）
+
+- 来源：`D:\githubs\m6-os11-99491`（CVE-2026-98499 + 99491 链：wacom/uhid UAF → finit_module）
+- exp：`artifacts/exp-g84ffa64b710b.c` + `refs/aoki/src/{ko_patch,ksu_boot}.c`，NDK r27 静态编译 + strip，475,576 B
+- 关键改动：`ksu_boot.c` 的 `finit_module` 参数改为读 `/data/local/tmp/ksu.param`（App 写入 `allow_shell=1 su_path=/system/bin/sh ksu_debug_manager_appid=<uid> mgr_pkgs=<pkg>`），与 kgo.sh 的 EXTRA 对齐
+- 资产：`route99491/{exp99491, cve99491-<build>.profile, ko-syms-<build>.txt}`
+
+### sp7 profile 的来源
+
+用户提供 `荣耀Magic6Pro-boot分区-实机提取-SP7-20261105.img`（boot v4，kernel offset 0x1000，size 0x0270ba00）。
+`vmlinux-to-elf` 从 Image 重建 ELF（113,401 符号，base 0xffffffc008000000），对比：
+
+| 符号 | sp7 boot | g84 真机 |
+|---|---|---|
+| prepare_creds | 0xffffffc00804b770 | 0xffffffc00804b770 |
+| uhid_device_add_worker | 0xffffffc008ac7c1c | 0xffffffc008ac7c1c |
+| selinux_state | 0xffffffc00a84b3a8 | 0xffffffc00a84b3a8 |
+| sig_enforce | 0xffffffc00a5a01a0 | 0xffffffc00a5a01a0 |
+
+⇒ 两个内核代码布局一致，profile 直接复用 g84；但 ko 的 268 个导入符号里 84 个有 0x40 级偏移 ⇒ sp7 用自己生成的 ko-syms。
+
+### App 改动（9.49 / 140）
+
+- 高级设置新增「改用 CVE-2026-99491 路线（实验）」开关
+- `Deployer.run99491()`：按 uname -r 选 profile/syms → 推 exp/profile/syms/ko/ksud → 写 ksu.param → 跑 exp99491 → 轮询 `/proc/modules` → 拉起管理器
+- 缺对应 build 的 profile/syms 时 fail-closed
+- 待验证：真机 99491 路线（g84 / sp7 各一次）
