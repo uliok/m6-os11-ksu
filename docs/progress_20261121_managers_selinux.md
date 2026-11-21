@@ -103,3 +103,15 @@
 - 信息卡「提权链路 / 漏洞后端」随开关切换（99491 / CVE-2026-98499 + CVE-2026-99491）
 - 99491 是独立路线：链路选择（实验/传统）入口隐藏，链路参数对它不生效（`run99491` 直接返回，不看 chain）；98260 默认实验路线（B2）
 - 关于页补齐上游仓库：SukiSU Nova（改名）、FinaSU v1.6.5、CVE-2026-99491 三仓（Aoki-Shinshi / woshigenm / Yunnijian）
+
+### App 9.55（146）：99491 支持 SUSFS，移除隐藏 su 入口
+
+- exp 新增 `ksu_load_susfs()`：KSU 装载 → 安装 ksud → GRANT_ROOT 之后，若 `/data/local/tmp/susfs.enable` 存在且三件套齐全，先试
+  `/data/adb/ksu/bin/su -c "sh susfs_load.sh ..."`，失败再退回直接 `/system/bin/sh susfs_load.sh ...`；失败只记日志
+- App 端沿用高级设置里的「加载 SUSFS」：99491 分支把 susfs_load.sh / susfs_guard_lkm.bin / susfs_insmod 推到 /data/local/tmp，写 marker，成功后日志打
+  `/sys/module/susfs_guard_lkm` + `/proc/susfs_path`
+- 关闭开关会删 marker，避免误加载上一次留下的 susfs 文件
+- 移除「隐藏式 su 入口」：高级设置开关、`PREF_SU_ENTRY`、Deployer 的 `suEntryEnabled` / `SU_ENTRY_ENABLE` 全部删除
+- exp 重建命令：
+  `aarch64-linux-android29-clang -O2 -static -I refs/aoki/src -o build/exp99491 artifacts/exp-g84ffa64b710b.c refs/aoki/src/ko_patch.c refs/aoki/src/ksu_boot.c`
+  + `llvm-strip --strip-all` → 476,280 B（md5 `1129d232e7387d7a5ad64a54700e7a33`）
