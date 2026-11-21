@@ -56,3 +56,43 @@ avc: denied { find } for pid=5272 uid=10277 name=activity
 |---|---|
 | `kernelsu_finasu164avf_os11.ko` | 726,472 B / md5 `34b931bcba4da9baa115e7b864f5fe90`，run 44780896516 |
 | 分支 | `av-filter`（不是 feat） |
+
+
+---
+
+## 追加：为什么「留 VFS 层、删 syscall 层」必崩
+
+`ksu_su_check_pre` 的做法是把 `regs->regs[1]` 当 `char __user **`，命中时用
+`ksu_su_push_path()` 塞一个**用户态指针**进去改写路径：
+
+- **syscall 层**（`__arm64_sys_faccessat` 等）：`regs[1]` 本来就是用户态路径指针，改写正确；
+- **VFS 层**（`vfs_statx` / `do_faccessat`）：`regs[1]` 已经是内核里的 `struct filename *`，
+  再塞用户态指针进去 = 把内核结构体指到用户地址，一解引用就写坏策略/框架。
+
+`feat` 的「方案 A」恰好删了 4 个 syscall 层、留下 2 个 VFS 层（`do_faccessat` + `vfs_statx`），
+方向反了，所以一装就 `avc denied service_manager`。`av-filter` 原样（6 个全在）不会触发
+这条错误改写，所以正常。
+
+## 追加：0 探针版（test/noprobe）真机结果
+
+做法：基于 `av-filter`，只把 6 个 `register_kprobe(&ksu_su_check_kps[_i])` 置空，
+数组/handler 保留但不注册；`execve` / `do_execveat_common` / `setresuid` 不动。
+
+真机（BVL-AN16 / os11）实测：
+
+| 项 | 结果 |
+|---|---|
+| 模块 | `kernelsu 380928 1 - Live (E)`，Enforcing |
+| 框架 | `dumpsys package` 可用、管理器 v1.6.5 正常启动，10 分钟 0 条 `avc denied service_manager` |
+| `kprobes/list` | `faccessat/vfs_statx/newfstatat/statx` 命中 **0 条**；只剩 `__arm64_sys_execve`、`do_execveat_common`、`__arm64_sys_setresuid` |
+| `ls -l /system/bin/su` | `No such file or directory`（按真实磁盘返回） |
+| `env /system/bin/su -c id`（shell 发起） | `uid=0(root) ... context=u:r:ksu:s0` ✅ |
+
+产物：
+
+| 目标 | 文件 | md5 |
+|---|---|---|
+| os11 | `kernelsu_finasu164nop_os11.ko`（722,936 B） | `c1f04eaf0d46df1604485c5dd08c490f` |
+| os11sp7 | `kernelsu_finasu164nopsp7_os11sp7.ko`（722,936 B） | `33442e37a8df8b58bba5642cc6714fc0` |
+
+分支：`test/noprobe`（基于 `av-filter`）。SP7 那份尚未真机验证（等 g7db56fb8f741 的机器）。
