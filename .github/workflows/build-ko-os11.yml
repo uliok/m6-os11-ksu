@@ -47,6 +47,10 @@ on:
         description: "打我们的 SELinux 隐藏补丁（false = 原厂实现，给别的管理器保稳定）"
         type: boolean
         default: true
+      last_match:
+        description: "把 1.6.4 的 first-match 回退成 last-match（本机符号有重复时用）"
+        type: boolean
+        default: false
       ko_alias:
         description: "产物 ko 的别名前缀（如 sukisu / finasu），留空则用原文件名"
         default: ""
@@ -55,9 +59,17 @@ on:
         description: "覆盖 ko 报给管理器的 KSU_VERSION（填管理器自己的版本号，如 finasu 33156）；留空=源码自动算"
         default: ""
         required: false
+      sysmap:
+        description: "额外上传 out/System.map（生成 CVE-2026-99491 profile / ko 符号表用）"
+        type: boolean
+        default: false
       mgr_pkg:
         description: "编进 ko 的默认管理器包名（如 com.resukisu.resukisu）；留空=沿用源码默认"
         default: ""
+        required: false
+      sp_table:
+        description: "方案B：setresuid 走 sys_call_table（1=开 / 0=只用 kprobe）"
+        default: "1"
         required: false
 
 jobs:
@@ -193,13 +205,20 @@ jobs:
           grep -rn "KERNEL_SU_UAPI_VERSION" "$KD"/uapi/supercall.h 2>/dev/null || true
           head -20 "$KD"/kernel/Makefile
 
+      - name: 可选回退 first-match
+        if: ${{ inputs.last_match }}
+        run: |
+          cd work/Code_Opensource/kernel
+          KD=$(ls -d KernelSU KernelSU-Next 2>/dev/null | head -1)
+          [ -n "$KD" ] && python3 "$GITHUB_WORKSPACE/patch/revert_first_match.py" "$KD" || true
+
       - name: 应用源码补丁
         run: |
           cd work/Code_Opensource/kernel
           KSUDIR=$(ls -d KernelSU KernelSU-Next 2>/dev/null | head -1)
           echo "KernelSU 源码目录: ${KSUDIR:-（没找到）}"
           if [ -n "$KSUDIR" ] && [ -f "$GITHUB_WORKSPACE/patch/apply_sc_inject.py" ]; then
-            python3 "$GITHUB_WORKSPACE/patch/apply_sc_inject.py" "$KSUDIR" || true
+            KSU_SP_TABLE="${{ inputs.sp_table }}" python3 "$GITHUB_WORKSPACE/patch/apply_sc_inject.py" "$KSUDIR" || true
             echo "---- 注入结果自检 ----"
             grep -n "ksu_sc_table_addr\|skip redirect" "$KSUDIR/kernel/hook/arm64/syscall_hook.c" | head -4 || true
             grep -n "skip redirect" "$KSUDIR/kernel/hook/syscall_hook_manager.c" | head -2 || true
@@ -484,6 +503,14 @@ jobs:
               echo "  （$CRC_PATH 还没有 ⇒ 跳过 CRC 比对；拿到 os11 设备/基准后补）"
             fi
           done
+
+      - name: 上传 System.map（可选，99491 profile 用）
+        if: inputs.sysmap
+        uses: actions/upload-artifact@v4
+        with:
+          name: sysmap-${{ inputs.target }}-${{ inputs.ksu_ref }}
+          path: work/Code_Opensource/kernel/out/System.map
+          if-no-files-found: error
 
       - name: 上传 build.log（总是）
         if: always()
