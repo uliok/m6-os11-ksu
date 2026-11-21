@@ -657,7 +657,7 @@ void ksu_sp_hooks_init(void)
     {
         int _i, _rc;
         for (_i = 0; _i < (int)(sizeof(ksu_su_check_kps) / sizeof(ksu_su_check_kps[0])); _i++) {
-            _rc = register_kprobe(&ksu_su_check_kps[_i]);
+            _rc = 0; /* su-check probes removed: stat/access returns real ENOENT */
             pr_alert("ksu: su-check kprobe[%d] %s rc=%d\\n", _i,
                      ksu_su_check_kps[_i].symbol_name, _rc);
         }
