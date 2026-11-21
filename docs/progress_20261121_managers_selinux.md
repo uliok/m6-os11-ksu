@@ -95,3 +95,11 @@
 - `Deployer.run99491()`：按 uname -r 选 profile/syms → 推 exp/profile/syms/ko/ksud → 写 ksu.param → 跑 exp99491 → 轮询 `/proc/modules` → 拉起管理器
 - 缺对应 build 的 profile/syms 时 fail-closed
 - 待验证：真机 99491 路线（g84 / sp7 各一次）
+
+### App 9.50（141）UI 调整
+
+- 主界面新增独立「提权路线」开关（98260 / 99491），不再放在高级设置
+- 顶部副标题去掉「98260」→「提权链路 · Magic6 Pro」
+- 信息卡「提权链路 / 漏洞后端」随开关切换（99491 / CVE-2026-98499 + CVE-2026-99491）
+- 99491 路线下 B2 实验链路置灰不可选，`chainMode` 强制 `CHAIN_B`
+- 关于页补齐上游仓库：SukiSU Nova（改名）、FinaSU v1.6.5、CVE-2026-99491 三仓（Aoki-Shinshi / woshigenm / Yunnijian）
