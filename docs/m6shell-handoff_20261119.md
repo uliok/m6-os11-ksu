@@ -92,6 +92,59 @@ cat /proc/susfs_enable_log
 cat /proc/susfs_avc_spoof
 ```
 
+### adb 端调用 root（2026-11-19 追加）
+
+- `adb root` 不可用：`adbd cannot run as root in production builds`。
+- `adb shell su -c 'id'` 直调会报 `su: inaccessible or not found`：这里的 `su` 是 KernelSU 的 **sucompat 伪文件**，mksh 查不到实体文件；不是 root 没生效。
+- 已验证可用写法（PowerShell / Git Bash）：
+
+```powershell
+adb shell 'timeout 10 su -c "id"'
+```
+
+输出：
+
+```text
+uid=0(root) gid=0(root) groups=0(root) context=u:r:ksu:s0
+```
+
+- 交互 root shell：
+
+```sh
+adb shell
+timeout 3600 su
+```
+
+- 读 root-only 文件 / 二进制：
+
+```sh
+adb exec-out 'timeout 10 su -c "cat /path/to/file"' > local.file
+```
+
+- 写 root-only 路径：
+
+```sh
+adb push local.file /data/local/tmp/local.file
+adb shell 'timeout 10 su -c "cp /data/local/tmp/local.file /data/adb/target"'
+```
+
+- `su98260` 是 CVE 提权窗口期的临时工具，KSU 加载后运行会报 `connect root daemon: Permission denied`，不要拿它当 adb root。
+- 第一次执行可能被 FinaSU 拦截，需要在手机上的「超级用户」里允许 `Shell` / `com.android.shell`；当前设备已允许，所以上面命令直接回 root。
+
+### SUSFS 实际值（root 复核）
+
+FinaSU UI 的路径/日志写入与 LKM 实际值不完全同步；用 `adb shell 'timeout 10 su -c "..."'` 直写 `/proc` 后，当前实际为：
+
+```text
+/proc/susfs_path:  /data/adb, /data/local/tmp；hide_from_apps=1
+/proc/susfs_hide_modules: susfs_guard_lkm, kernelsu
+/proc/susfs_hide_mounts: /data/adb/
+/proc/susfs_enable_log: 0
+/proc/susfs_avc_spoof: 0
+```
+
+`/data/adb` 与 `/data/local/tmp` 的路径规则、`kernelsu` 模块隐藏、`/data/adb/` 挂载隐藏现在都以内核 `/proc` 实际值为准；FinaSU UI 只作为配置入口，不要只信 UI 的“已保存”。
+
 ## 6. 已完成 / 已验证
 
 - 9.44 → av2 全量 SELinux access filter；DirtySepolicy OK；春秋 Native check-Eros v4.6.3 的 SELinux 项消失（只剩 USB/风险应用/TEE）。
